@@ -28,30 +28,40 @@ package Tx;
 use Mojo::Base -base;
 use Mojo::Loader qw(data_section find_modules load_class);
 
+use Data::Dumper;
+
 has pg => sub { Mojo::Pg->new };
 has object => sub { Tx::Model::Object->new(tx => shift) };
 has person => sub { Tx::Model::Person->new(tx => shift) };
+has plugins => sub { [qw/Person::Isonas Person::Barcode Object::Barcode/] };
 
 sub parse {
   my ($self, $bytes) = @_;
   chomp $bytes;
   return undef unless $bytes;
-  printf "Parsing up %s\n", $bytes;
-  for my $module (find_modules 'Tx::Plugin') {
-    my $e = load_class $module;
-    warn qq{Loading "$module" failed: $e} and next if ref $e;
+  printf "Parsing %s\n", $bytes;
+  for my $module ( @{$self->plugins}, find_modules 'Tx::Plugin' ) {
+    if ( $module =~ /^Tx::Plugin/ ) {
+      my $e = load_class $module;
+      warn qq{Loading "$module" failed: $e} and next if ref $e;
+    } else {
+      $module = "Tx::Plugin::$module";
+    }
+#warn "!!! $module\n";
     if ( my $regex = $module->regex($bytes => $self) ) {
-      printf "%s got %s\n", ref $module, ref $regex;
+      printf "%s got %s\n", $module, ref $regex;
       if ( $regex->isa('Tx::Model::Object') ) {
+        $self->object->lookup;
         if ( $self->object->status ) {
-          printf "Got %s: %s -- currently %s, last checked out by %s on %s until %s\n", ref $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout, $self->object->returned;
+          printf "Got %s: %s -- currently %s, last checked out by %s on %s until %s\n", $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout, $self->object->returned;
           $self->object->checkout if $self->person->id;
         } else {
-          printf "Got %s: %s -- currently %s, checked out by %s on %s\n", ref $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout;
+          printf "Got %s: %s -- currently %s, checked out by %s on %s\n", $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout;
           $self->object->Return;
         }
       } elsif ( $regex->isa('Tx::Model::Person') ) {
-        printf "%s: %s -- %s\n", ref $module, $self->person->name, $self->person->id;
+        $self->person->lookup;
+        printf "%s: %s -- %s\n", $module, $self->person->name, $self->person->id;
         $self->object->checkout if $self->object->id;
       } else {
         say "Unknown input";
@@ -66,8 +76,8 @@ sub parse {
 sub reset {
   my $self = shift;
   say "Resetting\n";
-  $self->object(Tx::Model::Object->new);
-  $self->person(Tx::Model::Person->new);
+  $self->object(Tx::Model::Object->new(tx => $self));
+  $self->person(Tx::Model::Person->new(tx => $self));
 }
 
 package Tx::Plugin::Person::Isonas;
@@ -79,7 +89,7 @@ sub regex {
     $tx->person->name("Person");
     $tx->person->id("Person ID");
     return $tx->person;
-  } elsif ( 
+  }
   return undef;
 }
 
@@ -90,7 +100,7 @@ sub regex {
   my ($self, $bytes, $tx) = @_;
   if ( $bytes =~ /^\d+$/ ) {
     $tx->person->id("Person ID");
-    return $person;
+    return $tx->person;
   }
   return undef;
 }
@@ -120,18 +130,16 @@ sub timeout {
   time - $self->timestamp > 15;
 }
 
-sub lookup {
-  warn "lookup not implemented\n";
-}
+sub lookup {}
 
 package Tx::Model::Object;
-use Mojo::Base 'Tx:Model';
+use Mojo::Base 'Tx::Model';
 
-has 'name';
-has 'status';
+has 'name' => '';
+has 'status' => '';
 has 'person' => sub { Tx::Model::Person->new(tx => shift->tx) };
-has 'checkedout';
-has 'returned';
+has 'checkedout' => '';
+has 'returned' => '';
 
 sub lookup {
   my $self = shift;
@@ -147,25 +155,25 @@ sub lookup {
 }
 
 sub checkout {
-  my ($self, $tx) = @_;
+  my $self = shift;
   return undef unless $self->id;
-  printf "Checking out: %s by %s\n", $self->name, $tx->person->name;
+  printf "Checking out: %s by %s\n", $self->name, $self->tx->person->name;
   # insert into tx (object, person, checkout) values (name, name, now())
-  $tx->reset;
+  $self->tx->reset;
 }
 
 sub Return {
-  my ($self, $tx) = @_;
+  my $self = shift;
   return undef unless $self->id;
   printf "Returning: %s\n", $self->name;
   # update tx set returned=now() where object=object and returned is null
-  $tx->reset;
+  $self->tx->reset;
 }
 
 package Tx::Model::Person;
 use Mojo::Base 'Tx::Model';
 
-has 'name';
+has 'name' => '';
 
 package main;
 use feature 'say';
@@ -178,20 +186,12 @@ Client->run($ARGV[0]);
 my $tx = Tx->new;
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
 
-Mojo::IOLoop->recurring($ENV{TICK} => sub {
-  printf "Status\n  Object: %s\n  Person: %s\n", $tx->object->id, $tx->person->id;
-}) if $ENV{TICK};
-Mojo::IOLoop->recurring(1 => sub {
-  $tx->reset if $tx->object->timeout || $tx->person->timeout;
-});
-
 $readable->on(close => sub { Mojo::IOLoop->stop });
    
 $readable->on(read => sub {
   my ($stream, $bytes) = @_;
   Mojo::IOLoop->next_tick(sub{
     my $loop = shift;
-    chomp $bytes;
     $tx->parse($bytes);
   });
 });
@@ -200,9 +200,16 @@ Mojo::IOLoop->server({port => 10001} => sub {
   my ($loop, $stream) = @_;
   $stream->on(read => sub {
     my ($stream, $bytes) = @_;
-    chomp $bytes;
     $tx->parse($bytes);
   });
+});
+
+Mojo::IOLoop->recurring($ENV{TICK} => sub {
+  printf "Status\n  Object: %s\n  Person: %s\n", $tx->object->id, $tx->person->id;
+}) if $ENV{TICK};
+
+Mojo::IOLoop->recurring(1 => sub {
+  $tx->reset if $tx->object->timeout || $tx->person->timeout;
 });
 
 # Start event loop if necessary
