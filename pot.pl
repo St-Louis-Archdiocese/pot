@@ -24,7 +24,6 @@ sub parse {
     if ( my $regex = $module->regex($bytes => $self) ) {
       #printf "%s got %s\n", $module, ref $regex;
       if ( $regex->isa('Tx::Model::Object') ) {
-        $self->object->lookup;
         if ( $self->object->checkedout ) {
           printf "%s: %s (%s) -- currently OUT, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, $self->object->person, scalar localtime($self->object->checkedout);
           $self->object->Return;
@@ -33,7 +32,6 @@ sub parse {
           $self->object->checkout if $self->person->id;
         }
       } elsif ( $regex->isa('Tx::Model::Person') ) {
-        $self->person->lookup;
         printf "%s: %s (%s)\n", $module, $self->person->name, $self->person->id;
         $self->object->checkout if $self->object->id;
       } else {
@@ -114,14 +112,6 @@ sub timeout {
   time - $self->timestamp > 15;
 }
 
-#sub reset {
-#  my $self = shift;
-#  warn "Reset: ", $self->person->id;
-#  $self->person(Person->new);
-#}
-
-sub lookup {}
-
 sub set {
   my ($self, $id, %data) = @_;
   $self->tx->db->{$self->_table}->{$id} = {%data};
@@ -157,19 +147,9 @@ sub _table {
 package Tx::Model::Object;
 use Mojo::Base 'Tx::Model';
 
-has 'name' => sub { shift->fetch->{name} };
-has 'person' => sub { shift->fetch->{person}->{name} };
-has 'checkedout' => sub { shift->fetch->{checkedout} };
-
-#sub lookup {
-#  my $self = shift;
-#  return undef unless $self->id;
-#  printf "Looking up %s\n", $self->id;
-#  $self->name($self->tx->db->{objects}->{$self->id}->{name}||'Unknown');
-#  $self->person($self->tx->db->{objects}->{$self->id}->{person}->{name}||'Unknown');
-#  $self->checkedout($self->tx->db->{objects}->{$self->id}->{checkedout}||0);
-#  $self;
-#}
+sub name { shift->fetch->{name} || 'Unknown' }
+sub person { shift->fetch->{person}->{name} || 'Unknown' }
+sub checkedout { shift->fetch->{checkedout} || 0 }
 
 sub checkout {
   my $self = shift;
@@ -177,6 +157,7 @@ sub checkout {
   printf "Checking out: %s by %s\n", $self->name, $self->tx->person->name;
   $self->fetch->{person} = {id => $self->tx->person->id, name => $self->tx->person->name};
   $self->fetch->{checkedout} = time;
+  $self->log;
   $self->tx->reset;
 }
 
@@ -185,13 +166,44 @@ sub Return {
   return undef unless $self->id;
   printf "Returning: %s\n", $self->name;
   $self->fetch->{checkedout} = undef;
+  $self->log;
   $self->tx->reset;
+}
+
+sub log {
+  my $self = shift;
+  if ( $self->checkedout ) {
+    push @{$self->tx->db->{log}}, sprintf "< %s -- %s (%s) -- %s (%s)", scalar localtime($self->checkedout), $self->name, $self->id, $self->person, $self->fetch->{person}->{id};
+  } else {
+    push @{$self->tx->db->{log}}, sprintf "> %s -- %s (%s) -- %s (%s)", scalar localtime, $self->name, $self->id, $self->person, $self->fetch->{person}->{id};
+  }
 }
 
 package Tx::Model::Person;
 use Mojo::Base 'Tx::Model';
 
 has 'name' => sub { shift->fetch->{name} };
+
+package Tx::Command::log;
+use Mojo::Base 'Mojolicious::Command';
+
+use Data::Dumper;
+
+has description => 'Show transaction log';
+
+sub run {
+  my $log = shift->app->tx->db->{log};
+  say for @$log;
+}
+
+package Tx::Command::clearlog;
+use Mojo::Base 'Mojolicious::Command';
+
+use Data::Dumper;
+
+has description => 'Show transaction log';
+
+sub run { delete shift->app->tx->db->{log} }
 
 package Tx::Command::object;
 use Mojo::Base 'Mojolicious::Commands';
@@ -215,9 +227,8 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 has description => 'Add Object to database';
 
 sub run {
-  my ($self, @args) = @_;
+  my ($self, $id, @args) = @_;
 
-  my $id = shift @args;
   my %data;
   my @args1;
   while ( $_ = shift @args ) {
@@ -235,9 +246,7 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 has description => 'Delete Object from database';
 
 sub run {
-  my ($self, @args) = @_;
-
-  my $id = shift @args;
+  my ($self, $id, @args) = @_;
 
   $self->app->tx->object->del($id);
 }
@@ -246,14 +255,25 @@ package Tx::Command::object::list;
 use Mojo::Base 'Mojolicious::Command';
 
 use Data::Dumper;
-use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 
 has description => 'List Objects in database';
 
-sub run {
-  my ($self, @args) = @_;
+sub run { say Dumper(shift->app->tx->object->get) }
 
-  say Dumper($self->app->tx->object->get);
+package Tx::Command::object::status;
+use Mojo::Base 'Mojolicious::Command';
+
+has description => 'Show Object status';
+
+sub run {
+  my ($self, $id) = @_;
+  $self->app->tx->object->id($id);
+  my $object = $self->app->tx->object;
+  if ( my $status = $object->checkedout ) {
+    printf "%s is currently unavailable. It was checked out %s by %s\n", $object->name, scalar localtime($object->checkedout), $object->person;
+  } else {
+    printf "%s is currently available. It was last checked out by %s\n", $object->name, $object->person;
+  }
 }
 
 package Tx::Command::client;
