@@ -1,6 +1,6 @@
 package Tx;
 use Mojo::Base -base;
-use Mojo::Loader qw(data_section find_modules load_class);
+use Mojo::Loader qw(find_modules load_class);
 
 use DBM::Deep;
 
@@ -26,10 +26,10 @@ sub parse {
       if ( $regex->isa('Tx::Model::Object') ) {
         $self->object->lookup;
         if ( $self->object->checkedout ) {
-          printf "%s: %s (%s) -- currently %s, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'OUT':'IN'), $self->object->person, scalar localtime($self->object->checkedout);
+          printf "%s: %s (%s) -- currently OUT, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, $self->object->person, scalar localtime($self->object->checkedout);
           $self->object->Return;
         } else {
-          printf "%s: %s (%s) -- currently %s, last checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'OUT':'IN'), $self->object->person, scalar localtime($self->object->checkedout);
+          printf "%s: %s (%s) -- currently IN\n", $module, $self->object->name, $self->object->id;
           $self->object->checkout if $self->person->id;
         }
       } elsif ( $regex->isa('Tx::Model::Person') ) {
@@ -81,6 +81,7 @@ sub regex {
   my ($self, $bytes, $tx) = @_;
   if ( $bytes =~ /^(\d+)$/ ) {
     $tx->reset($tx->person);
+    $tx->person->name("Name $1");
     $tx->person->id($1);
     return $tx->person;
   }
@@ -104,7 +105,7 @@ package Tx::Model;
 use Mojo::Base -base;
 
 has 'tx';
-has 'id';
+has 'id' => '';
 has 'timestamp' => sub { time };
 
 sub timeout {
@@ -135,7 +136,7 @@ sub lookup {
   return undef unless $self->id;
   printf "Looking up %s\n", $self->id;
   $self->name($self->tx->db->{objects}->{$self->id}->{name}||'Unknown');
-  $self->person($self->tx->db->{objects}->{$self->id}->{person}||'Unknown');
+  $self->person($self->tx->db->{objects}->{$self->id}->{person}->{name}||'Unknown');
   $self->checkedout($self->tx->db->{objects}->{$self->id}->{checkedout}||0);
   $self;
 }
@@ -308,7 +309,7 @@ sub run {
     my ($loop, $stream) = @_;
     $stream->on(read => sub {
       my ($stream, $bytes) = @_;
-      app->tx->parse($bytes);
+      $self->app->tx->parse($bytes);
     });
   });
   Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
@@ -321,9 +322,7 @@ use Mojo::IOLoop::Stream;
 use Mojolicious::Commands;
 @{app->commands->namespaces} = ('Tx::Command');
 
-use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
-
-helper tx => sub { Tx->new };
+my $tx = Tx->new;
 
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
 $readable->on(close => sub { Mojo::IOLoop->stop });
@@ -331,10 +330,12 @@ $readable->on(read => sub {
   my ($stream, $bytes) = @_;
   Mojo::IOLoop->next_tick(sub{
     my $loop = shift;
-    app->tx->parse($bytes);
+    $tx->parse($bytes);
   });
 });
 $readable->start;
+
+helper tx => sub { $tx };
 
 Mojo::IOLoop->recurring($ENV{TICK} => sub {
   printf "Status\n  Object: %s\n  Person: %s\n", app->tx->object->id, app->tx->person->id;
