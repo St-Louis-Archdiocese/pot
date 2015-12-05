@@ -362,12 +362,12 @@ use Mojolicious::Commands;
 @{app->commands->namespaces} = ('Tx::Command');
 
 use Term::ReadKey;
-ReadMode ('noecho');
+ReadMode('noecho');
 
 my $tx = Tx->new;
 
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
-$readable->on(close => sub { ReadMode ('normal'); Mojo::IOLoop->stop });
+$readable->on(close => sub { ReadMode('normal'); Mojo::IOLoop->stop });
 $readable->on(read => sub {
   my ($stream, $bytes) = @_;
   Mojo::IOLoop->next_tick(sub{
