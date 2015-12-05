@@ -13,7 +13,7 @@ sub parse {
   my ($self, $bytes) = @_;
   chomp $bytes;
   return undef unless $bytes;
-  printf "Parsing %s\n", $bytes;
+  #printf "Parsing %s\n", $bytes;
   for my $module ( @{$self->plugins}, find_modules 'Tx::Plugin' ) {
     if ( $module =~ /^Tx::Plugin/ ) {
       my $e = load_class $module;
@@ -46,7 +46,7 @@ sub parse {
 
 sub reset {
   my ($self, $model) = @_;
-  say join '', 'Resetting ', ref $model, "\n";
+  say join '', 'Resetting ', ref $model, "\n" if $ENV{DEBUG} || ! ref $model;
   $self->object(Tx::Model::Object->new(tx => $self)) if !$model || ref $model eq 'Tx::Model::Object';
   $self->person(Tx::Model::Person->new(tx => $self)) if !$model || ref $model eq 'Tx::Model::Person';
 }
@@ -304,6 +304,7 @@ sub run {
   $client->on(connect => sub {
     my ($client, $handle) = @_;
     $handle->write($message);
+    exit;
   });
   $client->on(error => sub {
     my ($client, $err) = @_;
@@ -313,6 +314,8 @@ sub run {
 
   # Start reactor if necessary
   $client->reactor->start unless $client->reactor->is_running;
+
+  exit;
 }
 
 package Tx::Command::server;
@@ -358,10 +361,13 @@ use Mojo::IOLoop::Stream;
 use Mojolicious::Commands;
 @{app->commands->namespaces} = ('Tx::Command');
 
+use Term::ReadKey;
+ReadMode ('noecho');
+
 my $tx = Tx->new;
 
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
-$readable->on(close => sub { Mojo::IOLoop->stop });
+$readable->on(close => sub { ReadMode ('normal'); Mojo::IOLoop->stop });
 $readable->on(read => sub {
   my ($stream, $bytes) = @_;
   Mojo::IOLoop->next_tick(sub{
