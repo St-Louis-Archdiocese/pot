@@ -1,36 +1,10 @@
-our $status = 0;
-
-package Client;
-use Mojo::IOLoop::Client;
-
-sub run {
-  my ($class, $message) = @_;
-  return unless $message;
-  my $client = Mojo::IOLoop::Client->new;
-  $client->on(connect => sub {
-    my ($client, $handle) = @_;
-    $handle->write($message);
-    #...
-  });
-  $client->on(error => sub {
-    my ($client, $err) = @_;
-    #...
-  });
-  $client->connect(address => '127.0.0.1', port => 10001);
-
-  # Start reactor if necessary
-  $client->reactor->start unless $client->reactor->is_running;
-
-  exit;
-}
-
 package Tx;
 use Mojo::Base -base;
 use Mojo::Loader qw(data_section find_modules load_class);
 
-use Data::Dumper;
+use DBM::Deep;
 
-has pg => sub { Mojo::Pg->new };
+has db => sub { DBM::Deep->new("foo.db") };
 has object => sub { Tx::Model::Object->new(tx => shift) };
 has person => sub { Tx::Model::Person->new(tx => shift) };
 has plugins => sub { [qw/Person::Isonas Person::Barcode Object::Barcode/] };
@@ -47,21 +21,20 @@ sub parse {
     } else {
       $module = "Tx::Plugin::$module";
     }
-#warn "!!! $module\n";
     if ( my $regex = $module->regex($bytes => $self) ) {
-      printf "%s got %s\n", $module, ref $regex;
+      #printf "%s got %s\n", $module, ref $regex;
       if ( $regex->isa('Tx::Model::Object') ) {
         $self->object->lookup;
-        if ( $self->object->status ) {
-          printf "Got %s: %s -- currently %s, last checked out by %s on %s until %s\n", $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout, $self->object->returned;
-          $self->object->checkout if $self->person->id;
-        } else {
-          printf "Got %s: %s -- currently %s, checked out by %s on %s\n", $module, $self->object->name, ($self->object->status?'IN':'OUT'), $self->object->person, $self->object->checkedout;
+        if ( $self->object->checkedout ) {
+          printf "%s: %s (%s) -- currently %s, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'IN':'OUT'), $self->object->person, scalar localtime($self->object->checkedout);
           $self->object->Return;
+        } else {
+          printf "%s: %s (%s) -- currently %s, last checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'IN':'OUT'), $self->object->person, scalar localtime($self->object->checkedout);
+          $self->object->checkout if $self->person->id;
         }
       } elsif ( $regex->isa('Tx::Model::Person') ) {
         $self->person->lookup;
-        printf "%s: %s -- %s\n", $module, $self->person->name, $self->person->id;
+        printf "%s: %s (%s)\n", $module, $self->person->name, $self->person->id;
         $self->object->checkout if $self->object->id;
       } else {
         say "Unknown input";
@@ -74,10 +47,10 @@ sub parse {
 }
 
 sub reset {
-  my $self = shift;
-  say "Resetting\n";
-  $self->object(Tx::Model::Object->new(tx => $self));
-  $self->person(Tx::Model::Person->new(tx => $self));
+  my ($self, $model) = @_;
+  say join '', 'Resetting ', ref $model, "\n";
+  $self->object(Tx::Model::Object->new(tx => $self)) if !$model || ref $model eq 'Tx::Model::Object';
+  $self->person(Tx::Model::Person->new(tx => $self)) if !$model || ref $model eq 'Tx::Model::Person';
 }
 
 package Tx::Plugin::Person::Isonas;
@@ -85,9 +58,17 @@ use Mojo::Base -base;
 
 sub regex {
   my ($self, $bytes, $tx) = @_;
-  if ( $bytes =~ /^<\d+>$/ ) {
-    $tx->person->name("Person");
-    $tx->person->id("Person ID");
+  my @person = ();
+  while ( $bytes =~ /<([^<>]+)>/g ) {
+    local $_ = $1;
+    s/\s+$//;
+    push @person, $_;
+  }
+  return undef unless @person;
+  if ( my ($date, $time, $action, $reader, $badge, $name, undef, undef, undef, undef, undef, undef, undef, undef, undef, undef, $guid) = @person ) {
+    $tx->reset($tx->person);
+    $tx->person->name($name);
+    $tx->person->id($badge);
     return $tx->person;
   }
   return undef;
@@ -98,8 +79,9 @@ use Mojo::Base -base;
 
 sub regex {
   my ($self, $bytes, $tx) = @_;
-  if ( $bytes =~ /^\d+$/ ) {
-    $tx->person->id("Person ID");
+  if ( $bytes =~ /^(\d+)$/ ) {
+    $tx->reset($tx->person);
+    $tx->person->id($1);
     return $tx->person;
   }
   return undef;
@@ -110,8 +92,9 @@ use Mojo::Base -base;
 
 sub regex {
   my ($self, $bytes, $tx) = @_;
-  if ( $bytes =~ /^[a-z]+$/ ) {
-    $tx->object->id("Person ID");
+  if ( $bytes =~ /^([a-z]+)$/ ) {
+    $tx->reset($tx->object);
+    $tx->object->id($1);
     return $tx->object;
   }
   return undef;
@@ -130,27 +113,30 @@ sub timeout {
   time - $self->timestamp > 15;
 }
 
+sub reset {
+  my $self = shift;
+  warn "Reset: ", $self->person->id;
+  $self->person(Person->new);
+}
+
 sub lookup {}
 
 package Tx::Model::Object;
 use Mojo::Base 'Tx::Model';
 
+use Data::Dumper;
+
 has 'name' => '';
-has 'status' => '';
-has 'person' => sub { Tx::Model::Person->new(tx => shift->tx) };
+has 'person' => sub { {} };
 has 'checkedout' => '';
-has 'returned' => '';
 
 sub lookup {
   my $self = shift;
   return undef unless $self->id;
   printf "Looking up %s\n", $self->id;
-  # select *,(if returned is null, 0, 1) status from objects left join tx where id = barcode
-  $self->name("Object");
-  $self->status(++$status%2==0);
-  $self->person("Person");
-  $self->checkedout("CheckedOut");
-  $self->returned("Returned");
+  $self->name($self->tx->db->{objects}->{name});
+  $self->person($self->tx->db->{objects}->{person});
+  $self->checkedout($self->tx->db->{objects}->{checkedout});
   $self;
 }
 
@@ -158,7 +144,8 @@ sub checkout {
   my $self = shift;
   return undef unless $self->id;
   printf "Checking out: %s by %s\n", $self->name, $self->tx->person->name;
-  # insert into tx (object, person, checkout) values (name, name, now())
+  $self->tx->db->{objects}->{$self->id}->{person} = {id => $self->tx->person->id, name => $self->tx->person->name};
+  $self->tx->db->{objects}->{$self->id}->{checkedout} = time;
   $self->tx->reset;
 }
 
@@ -166,52 +153,155 @@ sub Return {
   my $self = shift;
   return undef unless $self->id;
   printf "Returning: %s\n", $self->name;
-  # update tx set returned=now() where object=object and returned is null
+  $self->tx->db->{objects}->{$self->id}->{checkedout} = undef;
   $self->tx->reset;
+}
+
+sub add {
+  my ($self, $id, $name) = @_;
+  $self->tx->db->{objects}->{$id} = {name => $name};
+}
+
+sub del {
+  my ($self, $id) = @_;
+  delete $self->tx->db->{objects}->{$id};
+}
+
+sub dump {
+  my $self = shift;
+  say Dumper($self->tx->db->{objects});
 }
 
 package Tx::Model::Person;
 use Mojo::Base 'Tx::Model';
 
+use Data::Dumper;
+
 has 'name' => '';
 
+package Tx::Command::object;
+use Mojo::Base 'Mojolicious::Command';
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+
+has description => 'Manipulate Object database';
+
+sub run {
+  my ($self, @args) = @_;
+
+  GetOptionsFromArray \@args,
+    'a|add=s' => sub { $self->app->tx->object->add(split /:/, $_[1]) },
+    'd|delete=s' => sub { $self->app->tx->object->del($_[1]) },
+    'l|list' => sub { $self->app->tx->object->dump };
+}
+
+package Tx::Command::client;
+use Mojo::Base 'Mojolicious::Commands';
+
+has description => 'Act as a client and send commands to the server';
+has hint        => <<EOF;
+
+See 'APPLICATION client help CLIENTS' for more information on a specific
+client.
+EOF
+has message    => sub { "Clients:\n" };
+has namespaces => sub { ['Tx::Command::client'] };
+
+sub help { shift->run(@_) }
+
+package Tx::Command::client::isonas;
+use Mojo::Base 'Mojolicious::Command';
+
+use Mojo::IOLoop::Client;
+
+has description => 'Send Isonas packet';
+
+sub run {
+  my ($self, $message, @args) = @_;
+  die "No message provided\n" unless $message;
+  my $client = Mojo::IOLoop::Client->new;
+  $client->on(connect => sub {
+    my ($client, $handle) = @_;
+    $handle->write($message);
+  });
+  $client->on(error => sub {
+    my ($client, $err) = @_;
+    die "Error sending message: $err\n";
+  });
+  $client->connect(address => '127.0.0.1', port => 10001);
+
+  # Start reactor if necessary
+  $client->reactor->start unless $client->reactor->is_running;
+}
+
+package Tx::Command::server;
+use Mojo::Base 'Mojolicious::Commands';
+
+has description => 'Run a packet-receiving server';
+has hint        => <<EOF;
+
+See 'APPLICATION server help SERVERS' for more information on a specific
+server.
+EOF
+has message    => sub { "Servers:\n" };
+has namespaces => sub { ['Tx::Command::server'] };
+
+sub help { shift->run(@_) }
+
+package Tx::Command::server::isonas;
+use Mojo::Base 'Mojolicious::Command';
+use Mojo::IOLoop;
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+
+has description => 'Start Isonas server';
+has usage => sub { shift->extract_usage };
+
+sub run {
+  my ($self, @args) = @_;
+
+  Mojo::IOLoop->server({port => 10001} => sub {
+    my ($loop, $stream) = @_;
+    $stream->on(read => sub {
+      my ($stream, $bytes) = @_;
+      app->tx->parse($bytes);
+    });
+  });
+  Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+}
+
 package main;
-use feature 'say';
-use Mojo::Pg;
+use Mojolicious::Lite;
 use Mojo::IOLoop;
 use Mojo::IOLoop::Stream;
+use Mojolicious::Commands;
+@{app->commands->namespaces} = ('Tx::Command');
 
-Client->run($ARGV[0]);
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 
-my $tx = Tx->new;
+helper tx => sub { Tx->new };
+
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
 
-$readable->on(close => sub { Mojo::IOLoop->stop });
-   
-$readable->on(read => sub {
-  my ($stream, $bytes) = @_;
-  Mojo::IOLoop->next_tick(sub{
-    my $loop = shift;
-    $tx->parse($bytes);
-  });
-});
-   
-Mojo::IOLoop->server({port => 10001} => sub {
-  my ($loop, $stream) = @_;
-  $stream->on(read => sub {
-    my ($stream, $bytes) = @_;
-    $tx->parse($bytes);
-  });
-});
+GetOptionsFromArray \@ARGV,
+  'i' => sub {
+    $readable->on(close => sub { Mojo::IOLoop->stop });
+    $readable->on(read => sub {
+      my ($stream, $bytes) = @_;
+      Mojo::IOLoop->next_tick(sub{
+        my $loop = shift;
+        app->tx->parse($bytes);
+      });
+    });
+    $readable->start;
+  };
 
 Mojo::IOLoop->recurring($ENV{TICK} => sub {
-  printf "Status\n  Object: %s\n  Person: %s\n", $tx->object->id, $tx->person->id;
+  printf "Status\n  Object: %s\n  Person: %s\n", app->tx->object->id, app->tx->person->id;
 }) if $ENV{TICK};
 
 Mojo::IOLoop->recurring(1 => sub {
-  $tx->reset if $tx->object->timeout || $tx->person->timeout;
+  app->tx->reset if app->tx->object->timeout || app->tx->person->timeout;
 });
 
-# Start event loop if necessary
-$readable->start;
-Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+app->start;
