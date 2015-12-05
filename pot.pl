@@ -26,10 +26,10 @@ sub parse {
       if ( $regex->isa('Tx::Model::Object') ) {
         $self->object->lookup;
         if ( $self->object->checkedout ) {
-          printf "%s: %s (%s) -- currently %s, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'IN':'OUT'), $self->object->person, scalar localtime($self->object->checkedout);
+          printf "%s: %s (%s) -- currently %s, checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'OUT':'IN'), $self->object->person, scalar localtime($self->object->checkedout);
           $self->object->Return;
         } else {
-          printf "%s: %s (%s) -- currently %s, last checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'IN':'OUT'), $self->object->person, scalar localtime($self->object->checkedout);
+          printf "%s: %s (%s) -- currently %s, last checked out by %s on %s\n", $module, $self->object->name, $self->object->id, ($self->object->checkedout?'OUT':'IN'), $self->object->person, scalar localtime($self->object->checkedout);
           $self->object->checkout if $self->person->id;
         }
       } elsif ( $regex->isa('Tx::Model::Person') ) {
@@ -134,9 +134,9 @@ sub lookup {
   my $self = shift;
   return undef unless $self->id;
   printf "Looking up %s\n", $self->id;
-  $self->name($self->tx->db->{objects}->{name});
-  $self->person($self->tx->db->{objects}->{person});
-  $self->checkedout($self->tx->db->{objects}->{checkedout});
+  $self->name($self->tx->db->{objects}->{$self->id}->{name}||'Unknown');
+  $self->person($self->tx->db->{objects}->{$self->id}->{person}||'Unknown');
+  $self->checkedout($self->tx->db->{objects}->{$self->id}->{checkedout}||0);
   $self;
 }
 
@@ -180,19 +180,63 @@ use Data::Dumper;
 has 'name' => '';
 
 package Tx::Command::object;
+use Mojo::Base 'Mojolicious::Commands';
+
+has description => 'Manipulate Object database';
+has hint        => <<EOF;
+
+See 'APPLICATION object help COMMANDS' for more information on a specific
+command.
+EOF
+has message    => sub { "Commands:\n" };
+has namespaces => sub { ['Tx::Command::object'] };
+
+sub help { shift->run(@_) }
+
+package Tx::Command::object::add;
 use Mojo::Base 'Mojolicious::Command';
 
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 
-has description => 'Manipulate Object database';
+has description => 'Add Object to database';
 
 sub run {
   my ($self, @args) = @_;
 
   GetOptionsFromArray \@args,
-    'a|add=s' => sub { $self->app->tx->object->add(split /:/, $_[1]) },
-    'd|delete=s' => sub { $self->app->tx->object->del($_[1]) },
-    'l|list' => sub { $self->app->tx->object->dump };
+    'n|name=s' => \(my $name = shift),
+    'i|id=s' => \(my $id = shift);
+
+  $self->app->tx->object->add($id, $name);
+}
+
+package Tx::Command::object::delete;
+use Mojo::Base 'Mojolicious::Command';
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+
+has description => 'Delete Object from database';
+
+sub run {
+  my ($self, @args) = @_;
+
+  GetOptionsFromArray \@args,
+    'i|id=s' => \(my $id = shift);
+
+  $self->app->tx->object->del($id);
+}
+
+package Tx::Command::object::list;
+use Mojo::Base 'Mojolicious::Command';
+
+use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
+
+has description => 'List Objects in database';
+
+sub run {
+  my ($self, @args) = @_;
+
+  $self->app->tx->object->dump;
 }
 
 package Tx::Command::client;
@@ -282,19 +326,15 @@ use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 helper tx => sub { Tx->new };
 
 my $readable = Mojo::IOLoop::Stream->new(\*STDIN)->timeout(0);
-
-GetOptionsFromArray \@ARGV,
-  'i' => sub {
-    $readable->on(close => sub { Mojo::IOLoop->stop });
-    $readable->on(read => sub {
-      my ($stream, $bytes) = @_;
-      Mojo::IOLoop->next_tick(sub{
-        my $loop = shift;
-        app->tx->parse($bytes);
-      });
-    });
-    $readable->start;
-  };
+$readable->on(close => sub { Mojo::IOLoop->stop });
+$readable->on(read => sub {
+  my ($stream, $bytes) = @_;
+  Mojo::IOLoop->next_tick(sub{
+    my $loop = shift;
+    app->tx->parse($bytes);
+  });
+});
+$readable->start;
 
 Mojo::IOLoop->recurring($ENV{TICK} => sub {
   printf "Status\n  Object: %s\n  Person: %s\n", app->tx->object->id, app->tx->person->id;
