@@ -4,7 +4,7 @@ use Mojo::Loader qw(find_modules load_class);
 
 use DBM::Deep;
 
-has db => sub { DBM::Deep->new("foo.db") };
+has db => sub { DBM::Deep->new("pot.db") };
 has object => sub { Tx::Model::Object->new(tx => shift) };
 has person => sub { Tx::Model::Person->new(tx => shift) };
 has plugins => sub { [qw/Person::Isonas Person::Barcode Object::Barcode/] };
