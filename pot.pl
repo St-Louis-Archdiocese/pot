@@ -114,39 +114,69 @@ sub timeout {
   time - $self->timestamp > 15;
 }
 
-sub reset {
-  my $self = shift;
-  warn "Reset: ", $self->person->id;
-  $self->person(Person->new);
-}
+#sub reset {
+#  my $self = shift;
+#  warn "Reset: ", $self->person->id;
+#  $self->person(Person->new);
+#}
 
 sub lookup {}
+
+sub set {
+  my ($self, $id, %data) = @_;
+  $self->tx->db->{$self->_table}->{$id} = {%data};
+}
+
+sub del {
+  my ($self, $id) = @_;
+  delete $self->tx->db->{$self->_table}->{$id};
+}
+
+sub get {
+  my ($self, $id) = @_;
+  if ( $id ) {
+    $self->tx->db->{$self->_table}->{$id};
+  } else {
+    $self->tx->db->{$self->_table};
+  }
+}
+
+sub fetch {
+  my $self = shift;
+  return {} unless $self->id;
+  $self->get($self->id);
+}
+
+sub _table {
+  my $self = shift;
+  my $table = lc(ref $self);
+  $table =~ /::(\w+)$/;
+  $1;
+}
 
 package Tx::Model::Object;
 use Mojo::Base 'Tx::Model';
 
-use Data::Dumper;
+has 'name' => sub { shift->fetch->{name} };
+has 'person' => sub { shift->fetch->{person}->{name} };
+has 'checkedout' => sub { shift->fetch->{checkedout} };
 
-has 'name' => '';
-has 'person' => sub { {} };
-has 'checkedout' => '';
-
-sub lookup {
-  my $self = shift;
-  return undef unless $self->id;
-  printf "Looking up %s\n", $self->id;
-  $self->name($self->tx->db->{objects}->{$self->id}->{name}||'Unknown');
-  $self->person($self->tx->db->{objects}->{$self->id}->{person}->{name}||'Unknown');
-  $self->checkedout($self->tx->db->{objects}->{$self->id}->{checkedout}||0);
-  $self;
-}
+#sub lookup {
+#  my $self = shift;
+#  return undef unless $self->id;
+#  printf "Looking up %s\n", $self->id;
+#  $self->name($self->tx->db->{objects}->{$self->id}->{name}||'Unknown');
+#  $self->person($self->tx->db->{objects}->{$self->id}->{person}->{name}||'Unknown');
+#  $self->checkedout($self->tx->db->{objects}->{$self->id}->{checkedout}||0);
+#  $self;
+#}
 
 sub checkout {
   my $self = shift;
   return undef unless $self->id;
   printf "Checking out: %s by %s\n", $self->name, $self->tx->person->name;
-  $self->tx->db->{objects}->{$self->id}->{person} = {id => $self->tx->person->id, name => $self->tx->person->name};
-  $self->tx->db->{objects}->{$self->id}->{checkedout} = time;
+  $self->fetch->{person} = {id => $self->tx->person->id, name => $self->tx->person->name};
+  $self->fetch->{checkedout} = time;
   $self->tx->reset;
 }
 
@@ -154,31 +184,14 @@ sub Return {
   my $self = shift;
   return undef unless $self->id;
   printf "Returning: %s\n", $self->name;
-  $self->tx->db->{objects}->{$self->id}->{checkedout} = undef;
+  $self->fetch->{checkedout} = undef;
   $self->tx->reset;
-}
-
-sub add {
-  my ($self, $id, $name) = @_;
-  $self->tx->db->{objects}->{$id} = {name => $name};
-}
-
-sub del {
-  my ($self, $id) = @_;
-  delete $self->tx->db->{objects}->{$id};
-}
-
-sub dump {
-  my $self = shift;
-  say Dumper($self->tx->db->{objects});
 }
 
 package Tx::Model::Person;
 use Mojo::Base 'Tx::Model';
 
-use Data::Dumper;
-
-has 'name' => '';
+has 'name' => sub { shift->fetch->{name} };
 
 package Tx::Command::object;
 use Mojo::Base 'Mojolicious::Commands';
@@ -204,11 +217,14 @@ has description => 'Add Object to database';
 sub run {
   my ($self, @args) = @_;
 
-  GetOptionsFromArray \@args,
-    'n|name=s' => \(my $name = shift),
-    'i|id=s' => \(my $id = shift);
-
-  $self->app->tx->object->add($id, $name);
+  my $id = shift @args;
+  my %data;
+  my @args1;
+  while ( $_ = shift @args ) {
+    push @args1, $_ and next unless s/^--//;
+    $data{$_} = shift @args;
+  }
+  $self->app->tx->object->set($id, %data);
 }
 
 package Tx::Command::object::delete;
@@ -221,8 +237,7 @@ has description => 'Delete Object from database';
 sub run {
   my ($self, @args) = @_;
 
-  GetOptionsFromArray \@args,
-    'i|id=s' => \(my $id = shift);
+  my $id = shift @args;
 
   $self->app->tx->object->del($id);
 }
@@ -230,6 +245,7 @@ sub run {
 package Tx::Command::object::list;
 use Mojo::Base 'Mojolicious::Command';
 
+use Data::Dumper;
 use Getopt::Long qw(GetOptionsFromArray :config no_auto_abbrev no_ignore_case);
 
 has description => 'List Objects in database';
@@ -237,7 +253,7 @@ has description => 'List Objects in database';
 sub run {
   my ($self, @args) = @_;
 
-  $self->app->tx->object->dump;
+  say Dumper($self->app->tx->object->get);
 }
 
 package Tx::Command::client;
